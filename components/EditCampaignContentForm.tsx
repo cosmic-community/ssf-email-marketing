@@ -22,9 +22,10 @@ import {
   Minimize,
   Save,
   Edit,
+  X,
 } from "lucide-react";
 import ContentEditor from "./shared/ContentEditor";
-import { useToast } from "@/hooks/useToast";
+import { useToast } from "@/hooks/use-toast";
 import { useTemplateSettings } from "@/hooks/useTemplateSettings";
 
 interface ContextItem {
@@ -53,10 +54,7 @@ export default function EditCampaignContentForm({
   const [aiStatus, setAiStatus] = useState("");
   const [aiProgress, setAiProgress] = useState(0);
   const [editingSessionActive, setEditingSessionActive] = useState(false);
-  const { addToast } = useToast();
-
-  // Simple editing states - start in view mode
-  const [isMainEditing, setIsMainEditing] = useState(false);
+  const { toast } = useToast();
 
   // Full screen state
   const [isFullScreen, setIsFullScreen] = useState(false);
@@ -72,7 +70,23 @@ export default function EditCampaignContentForm({
   // Refs for autofocus and auto-resize
   const aiPromptRef = useRef<HTMLTextAreaElement>(null);
 
-  // Form state - SINGLE SOURCE OF TRUTH
+  // CRITICAL: Separate display state from editing state
+  // Display state - what's shown in read-only view (NEVER changes during editing)
+  const [displayData, setDisplayData] = useState({
+    subject:
+      campaign.metadata.campaign_content?.subject ||
+      campaign.metadata.subject ||
+      "",
+    content:
+      campaign.metadata.campaign_content?.content ||
+      campaign.metadata.content ||
+      "",
+    template_type:
+      (campaign.metadata.campaign_content?.template_type
+        ?.value as TemplateType) || "Newsletter",
+  });
+
+  // Form state - ONLY used during editing sessions
   const [formData, setFormData] = useState({
     subject:
       campaign.metadata.campaign_content?.subject ||
@@ -120,8 +134,9 @@ export default function EditCampaignContentForm({
     setHasUnsavedChanges(hasFormChanges() && !isSubmitting);
   }, [formData, isSubmitting]);
 
-  // Handle content change from shared editor
+  // CRITICAL: Handle content change from shared editor with proper state sync
   const handleContentChange = (content: string) => {
+    // Immediately update form data to ensure content is saved
     setFormData((prev) => ({ ...prev, content }));
   };
 
@@ -131,13 +146,21 @@ export default function EditCampaignContentForm({
 
     if (!formData.subject.trim()) {
       setError("Subject line is required");
-      addToast("Please enter a subject line", "error");
+      toast({
+        title: "Validation Error",
+        description: "Please enter a subject line",
+        variant: "destructive",
+      });
       return;
     }
 
     if (!formData.content.trim()) {
       setError("Content is required");
-      addToast("Please enter email content", "error");
+      toast({
+        title: "Validation Error",
+        description: "Please enter email content",
+        variant: "destructive",
+      });
       return;
     }
 
@@ -167,15 +190,27 @@ export default function EditCampaignContentForm({
 
         const result = await response.json();
 
-        // Update original form data to reflect saved state
-        setOriginalFormData({
+        // CRITICAL: Store saved data but DON'T update display data yet
+        const savedData = {
           subject: formData.subject,
           content: formData.content,
           template_type: formData.template_type,
-        });
+        };
+
+        // Update what's considered "saved" for change tracking
+        setOriginalFormData(savedData);
 
         setSuccess("Campaign content updated successfully!");
-        addToast("Campaign content saved successfully!", "success");
+        
+        // ENHANCED: Show highly visible success toast
+        toast({
+          title: "Success!",
+          description: "🎉 Campaign content saved successfully!",
+          variant: "success",
+        });
+
+        // CRITICAL: End the editing session which will update display data
+        endEditingSession(savedData);
 
         // Refresh the page to get updated data
         router.refresh();
@@ -186,26 +221,40 @@ export default function EditCampaignContentForm({
             ? error.message
             : "Failed to update campaign content";
         setError(errorMessage);
-        addToast(errorMessage, "error");
+        toast({
+          title: "Error",
+          description: errorMessage,
+          variant: "destructive",
+        });
       } finally {
         setIsSubmitting(false);
       }
     });
   };
 
-  // Start editing session
+  // Start editing session - CRITICAL: Don't change display data
   const startEditingSession = () => {
     setEditingSessionActive(true);
-    setIsMainEditing(true);
     setIsFullScreen(true); // Open directly in full screen
     setError("");
     setSuccess("");
+    
+    // CRITICAL: Initialize form data with current display data (not campaign metadata)
+    // This ensures we start editing with what's currently displayed
+    setFormData({
+      subject: displayData.subject,
+      content: displayData.content,
+      template_type: displayData.template_type,
+    });
   };
 
-  // End editing session
-  const endEditingSession = () => {
+  // CRITICAL: Enhanced end editing session - only update display data when ending
+  const endEditingSession = (savedData?: {
+    subject: string;
+    content: string;
+    template_type: TemplateType;
+  }) => {
     setEditingSessionActive(false);
-    setIsMainEditing(false);
     setIsFullScreen(false); // Exit full screen when ending session
     setIsAIEditing(false);
     setAiPrompt("");
@@ -215,6 +264,28 @@ export default function EditCampaignContentForm({
     setContextItems([]);
     setShowContextInput(false);
     setContextUrl("");
+    
+    // CRITICAL: Update display data ONLY when ending the session
+    // If savedData is provided (from successful save), use that
+    // Otherwise, keep the existing display data unchanged
+    if (savedData) {
+      setDisplayData(savedData);
+    }
+    
+    // Reset form data to current display data
+    const currentDisplayData = savedData || displayData;
+    setFormData({
+      subject: currentDisplayData.subject,
+      content: currentDisplayData.content,
+      template_type: currentDisplayData.template_type,
+    });
+  };
+
+  // FIXED: Close full screen button - now properly ends editing session
+  const handleCloseFullScreen = () => {
+    // CRITICAL: End the entire editing session, don't just toggle full screen
+    // This ensures the fields return to read-only mode
+    endEditingSession();
   };
 
   // Handle AI editing
@@ -282,11 +353,13 @@ export default function EditCampaignContentForm({
                 } else if (data.type === "content") {
                   accumulatedContent += data.text;
                   setStreamingContent(accumulatedContent);
+                  // CRITICAL: Update form data immediately with streaming content
                   setFormData((prev) => ({
                     ...prev,
                     content: accumulatedContent,
                   }));
                 } else if (data.type === "complete") {
+                  // CRITICAL: Final update with complete content
                   setFormData((prev) => ({
                     ...prev,
                     content: data.data.content,
@@ -295,10 +368,11 @@ export default function EditCampaignContentForm({
                   setAiPrompt("");
                   setAiStatus("Editing complete!");
                   setAiProgress(100);
-                  addToast(
-                    "Content edited successfully! Continue editing or save campaign.",
-                    "success"
-                  );
+                  toast({
+                    title: "AI Editing Complete",
+                    description: "Content edited successfully! Continue editing or save campaign.",
+                    variant: "success",
+                  });
 
                   // Content will be updated via the shared ContentEditor
                 } else if (data.type === "error") {
@@ -315,10 +389,13 @@ export default function EditCampaignContentForm({
       }
     } catch (error) {
       console.error("AI editing error:", error);
-      setError(
-        error instanceof Error ? error.message : "Failed to edit with AI"
-      );
-      addToast("AI editing failed. Please try again.", "error");
+      const errorMessage = error instanceof Error ? error.message : "Failed to edit with AI";
+      setError(errorMessage);
+      toast({
+        title: "AI Editing Failed",
+        description: "AI editing failed. Please try again.",
+        variant: "destructive",
+      });
     } finally {
       setIsAIEditing(false);
       setAiStatus("");
@@ -358,22 +435,18 @@ export default function EditCampaignContentForm({
     setContextItems((prev) => prev.filter((item) => item.id !== id));
   };
 
-  // Toggle full screen mode
-  const toggleFullScreen = () => {
-    setIsFullScreen(!isFullScreen);
-  };
-
-  // Handle escape key to exit full screen
+  // Handle escape key to exit editing session completely
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && isFullScreen) {
-        setIsFullScreen(false);
+      if (e.key === "Escape" && editingSessionActive) {
+        // FIXED: End the entire editing session on escape, not just full screen
+        endEditingSession();
       }
     };
 
     document.addEventListener("keydown", handleEscape);
     return () => document.removeEventListener("keydown", handleEscape);
-  }, [isFullScreen]);
+  }, [editingSessionActive]);
 
   const canEdit = campaign.metadata.status?.value === "Draft";
 
@@ -401,18 +474,15 @@ export default function EditCampaignContentForm({
                   Edit Content
                 </Button>
               )}
-              {editingSessionActive && (
+              {editingSessionActive && isFullScreen && (
                 <Button
-                  onClick={toggleFullScreen}
+                  onClick={handleCloseFullScreen}
                   variant="outline"
                   size="sm"
                   className="text-gray-600"
+                  title="Close editor and return to read-only view"
                 >
-                  {isFullScreen ? (
-                    <Minimize className="h-4 w-4" />
-                  ) : (
-                    <Maximize className="h-4 w-4" />
-                  )}
+                  <X className="h-4 w-4" />
                 </Button>
               )}
             </div>
@@ -686,7 +756,7 @@ export default function EditCampaignContentForm({
               <div className="flex items-center justify-between pt-6 border-t">
                 <Button
                   type="button"
-                  onClick={endEditingSession}
+                  onClick={() => endEditingSession()}
                   variant="outline"
                   disabled={isSubmitting}
                 >
@@ -722,19 +792,19 @@ export default function EditCampaignContentForm({
               </div>
             </form>
           ) : (
-            /* Read-only view */
+            /* CRITICAL: Read-only view uses displayData - NEVER changes during editing */
             <div className="space-y-6">
-              {/* Subject Preview */}
+              {/* Subject Preview - Shows displayData, not formData */}
               <div className="space-y-2">
                 <Label className="text-sm font-medium text-gray-700">
                   Subject Line
                 </Label>
                 <div className="p-3 bg-gray-50 rounded-md border text-sm">
-                  {formData.subject || "No subject line"}
+                  {displayData.subject || "No subject line"}
                 </div>
               </div>
 
-              {/* Content Preview */}
+              {/* Content Preview - Shows displayData, not formData */}
               <div className="space-y-2">
                 <Label className="text-sm font-medium text-gray-700">
                   Email Content
@@ -748,7 +818,7 @@ export default function EditCampaignContentForm({
                   <div
                     className="p-4 max-h-96 overflow-y-auto bg-white"
                     dangerouslySetInnerHTML={{
-                      __html: formData.content || "No content",
+                      __html: displayData.content || "No content",
                     }}
                     style={{
                       fontFamily: "system-ui, -apple-system, sans-serif",
